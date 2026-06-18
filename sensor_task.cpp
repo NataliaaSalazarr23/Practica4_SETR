@@ -1,8 +1,14 @@
+/*
+ * Tarea encargada de adquirir datos del sensor LDR.
+ * Realiza varias lecturas ADC, aplica un filtro de mediana
+ * y determina el ángulo objetivo que deberá adoptar el servo.
+ * Cuando detecta un cambio de estado envía un mensaje al Task Manager.
+ */
+
 #include "sensor_task.hpp"
 #include "app_config.hpp"
 #include "app_context.hpp"
 #include "messages.hpp"
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -10,7 +16,10 @@
 namespace App
 {
     static const char *TAG = "SENSOR";
-
+    /*
+     * Implementación de filtro de mediana.
+     * Ordena las muestras y devuelve el valor central.
+     */
     static uint16_t median_u16(uint16_t *v, uint8_t n)
     {
         for (uint8_t i = 0; i < n - 1; i++)
@@ -25,9 +34,13 @@ namespace App
                 }
             }
         }
+
         return v[n / 2];
     }
 
+    /*
+     * Determina el estado del sistema a partir de la iluminación medida.
+     */
     static uint8_t target_from_ldr(uint16_t filtered)
     {
         if (filtered >= AppConfig::LDR_THRESHOLD_HIGH)
@@ -36,28 +49,38 @@ namespace App
         if (filtered <= AppConfig::LDR_THRESHOLD_LOW)
             return AppConfig::SERVO_ANGLE_DARK;
 
-        return (filtered > ((AppConfig::LDR_THRESHOLD_LOW + AppConfig::LDR_THRESHOLD_HIGH) / 2))
-               ? AppConfig::SERVO_ANGLE_LIGHT
-               : AppConfig::SERVO_ANGLE_DARK;
+        return (filtered >
+                ((AppConfig::LDR_THRESHOLD_LOW +
+                  AppConfig::LDR_THRESHOLD_HIGH) / 2))
+                   ? AppConfig::SERVO_ANGLE_LIGHT
+                   : AppConfig::SERVO_ANGLE_DARK;
     }
 
     void SensorTask::run(void *pvParameters)
     {
         auto *cfg = static_cast<SensorTaskConfig *>(pvParameters);
 
+        // Inicialización del ADC
         adc_oneshot_unit_handle_t adc_handle;
 
         adc_oneshot_unit_init_cfg_t unit_cfg = {};
         unit_cfg.unit_id = cfg->unit_id;
         unit_cfg.ulp_mode = ADC_ULP_MODE_DISABLE;
         unit_cfg.clk_src = ADC_RTC_CLK_SRC_DEFAULT;
+
         ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &adc_handle));
 
-        adc_oneshot_chan_cfg_t chan_cfg = {
+        adc_oneshot_chan_cfg_t chan_cfg =
+        {
             .atten = ADC_ATTEN_DB_12,
             .bitwidth = ADC_BITWIDTH_12
         };
-        ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, cfg->channel, &chan_cfg));
+
+        ESP_ERROR_CHECK(
+            adc_oneshot_config_channel(
+                adc_handle,
+                cfg->channel,
+                &chan_cfg));
 
         ESP_LOGI(TAG, "%s iniciado", cfg->name);
 
@@ -67,18 +90,29 @@ namespace App
         {
             uint16_t samples[AppConfig::FILTER_WINDOW_SIZE];
 
+            // Adquisición de muestras
             for (uint8_t i = 0; i < cfg->filter_window; i++)
             {
                 int raw_adc = 0;
-                adc_oneshot_read(adc_handle, cfg->channel, &raw_adc);
+
+                adc_oneshot_read(
+                    adc_handle,
+                    cfg->channel,
+                    &raw_adc);
+
                 samples[i] = (uint16_t)raw_adc;
+
                 vTaskDelay(pdMS_TO_TICKS(5));
             }
 
-            uint16_t filtered = median_u16(samples, cfg->filter_window);
-            uint8_t state = target_from_ldr(filtered);
+            // Aplicación del filtro de mediana
+            uint16_t filtered =
+                median_u16(samples, cfg->filter_window);
 
-            // SOLO evento cuando cambia realmente el estado
+            uint8_t state =
+                target_from_ldr(filtered);
+
+            // Solo genera evento cuando existe un cambio
             if (state != last_state)
             {
                 last_state = state;
@@ -91,7 +125,9 @@ namespace App
 
                 xQueueOverwrite(g_queues.sensor, &msg);
 
-                ESP_LOGI(TAG, "EVENTO SENSOR: %u", state);
+                ESP_LOGI(TAG,
+                         "EVENTO SENSOR: %u",
+                         state);
             }
 
             vTaskDelay(pdMS_TO_TICKS(cfg->period_ms));
